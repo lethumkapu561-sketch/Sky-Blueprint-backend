@@ -294,6 +294,160 @@ app.post('/api/match-jobs', (req, res) => {
   });
 });
 
+
+
+// ── EMAIL NOTIFICATIONS ──
+// Using nodemailer with Gmail SMTP (free, reliable)
+// To activate: add GMAIL_USER and GMAIL_PASS to Railway environment variables
+
+async function sendEmail(to, subject, htmlBody) {
+  try {
+    const nodemailer = require('nodemailer');
+
+    // Gmail SMTP - reads credentials from Railway environment variables
+    const GMAIL_USER = process.env.GMAIL_USER;
+    const GMAIL_PASS = process.env.GMAIL_PASS;
+
+    if (!GMAIL_USER || !GMAIL_PASS) {
+      console.log('EMAIL NOT SENT - Missing GMAIL_USER or GMAIL_PASS in Railway environment variables');
+      console.log('Would send to:', to, '| Subject:', subject);
+      return false;
+    }
+
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+    });
+
+    await transporter.sendMail({
+      from: 'Sky Blueprint <' + GMAIL_USER + '>',
+      to: to,
+      subject: subject,
+      html: htmlBody
+    });
+
+    console.log('EMAIL SENT to:', to, '| Subject:', subject);
+    return true;
+  } catch(err) {
+    console.error('Email send error:', err.message);
+    return false;
+  }
+}
+
+// ── ENDPOINT: Welcome email on registration ──
+app.post('/api/welcome-email', async (req, res) => {
+  const { email, fname, lname } = req.body;
+  if (!email || !fname) return res.status(400).json({ error: 'Email and name required' });
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#060914;color:#e2e8f0;padding:32px;border-radius:16px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:32px;font-weight:800;color:#38bdf8">Sky Blueprint</div>
+        <div style="font-size:14px;color:#64748b">Your Digital Life, Unified</div>
+      </div>
+      <h2 style="color:#fff;margin-bottom:12px">Welcome to Sky Blueprint, \${fname}! 🎉</h2>
+      <p style="color:#94a3b8;line-height:1.7;margin-bottom:20px">
+        Thank you for joining Sky Blueprint — South Africa's all-in-one digital platform. 
+        Your account has been created successfully.
+      </p>
+      <div style="background:#0f1629;border-radius:12px;padding:20px;margin-bottom:20px">
+        <h3 style="color:#38bdf8;margin-bottom:12px">Your 7-Day Free Trial is Active!</h3>
+        <p style="color:#94a3b8;font-size:14px;margin-bottom:16px">You have full access to all 6 tools for 7 days — no credit card needed.</p>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="color:#e2e8f0;font-size:14px">🌐 Website Builder</div>
+          <div style="color:#e2e8f0;font-size:14px">📧 Email Cleaner</div>
+          <div style="color:#e2e8f0;font-size:14px">📍 Find My Phone</div>
+          <div style="color:#e2e8f0;font-size:14px">🤖 AI Business Mentor</div>
+          <div style="color:#e2e8f0;font-size:14px">📄 CV Builder & Jobs</div>
+          <div style="color:#e2e8f0;font-size:14px">🗺️ SA Map (Always Free)</div>
+        </div>
+      </div>
+      <div style="text-align:center;margin-bottom:20px">
+        <a href="https://lethumkapu561-sketch.github.io/Sky-Blueprint" style="background:linear-gradient(135deg,#38bdf8,#6366f1);color:#fff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block">Go to Sky Blueprint</a>
+      </div>
+      <p style="color:#475569;font-size:12px;text-align:center">After 7 days, subscribe for only R55/month to keep full access.</p>
+      <p style="color:#475569;font-size:12px;text-align:center;margin-top:8px">Questions? Contact us: lethumkapu561@gmail.com | 065 601 3544</p>
+    </div>
+  `;
+
+  await sendEmail(email, 'Welcome to Sky Blueprint! Your account is ready', html);
+  res.json({ success: true, message: 'Welcome email sent' });
+});
+
+// ── ENDPOINT: Subscription reminder ──
+app.post('/api/remind-subscription', async (req, res) => {
+  const { email, fname, daysLeft, amount } = req.body;
+  if (!email || !fname) return res.status(400).json({ error: 'Required fields missing' });
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#060914;color:#e2e8f0;padding:32px;border-radius:16px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:32px;font-weight:800;color:#38bdf8">Sky Blueprint</div>
+      </div>
+      <h2 style="color:#fff;margin-bottom:12px">Hi \${fname}, your subscription renews in \${daysLeft} day\${daysLeft === 1 ? '' : 's'}</h2>
+      <p style="color:#94a3b8;line-height:1.7;margin-bottom:20px">
+        Your Sky Blueprint subscription will automatically renew for <strong style="color:#38bdf8">R\${amount || 55}/month</strong>. 
+        Your card on file will be charged via Paystack.
+      </p>
+      <div style="background:#0f1629;border-radius:12px;padding:20px;margin-bottom:20px;text-align:center">
+        <div style="font-size:36px;font-weight:800;color:#fff">R\${amount || 55}</div>
+        <div style="color:#64748b;font-size:14px">Monthly Subscription</div>
+      </div>
+      <div style="text-align:center;margin-bottom:20px">
+        <a href="https://lethumkapu561-sketch.github.io/Sky-Blueprint" style="background:linear-gradient(135deg,#38bdf8,#6366f1);color:#fff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block">Manage My Subscription</a>
+      </div>
+      <p style="color:#475569;font-size:12px;text-align:center">To cancel, log into Sky Blueprint and contact support before renewal date.</p>
+      <p style="color:#475569;font-size:12px;text-align:center;margin-top:8px">Questions? lethumkapu561@gmail.com | 065 601 3544</p>
+    </div>
+  `;
+
+  await sendEmail(email, 'Sky Blueprint — Your subscription renews in ' + daysLeft + ' day(s)', html);
+  res.json({ success: true, message: 'Reminder sent' });
+});
+
+
+
+// ── WEBSITE ORDER - emails owner full details ──
+app.post('/api/website-order', async (req, res) => {
+  const order = req.body;
+  
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#060914;color:#e2e8f0;padding:32px;border-radius:16px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:28px;font-weight:800;color:#38bdf8">Sky Blueprint</div>
+        <div style="font-size:14px;color:#64748b">New Website Order Received!</div>
+      </div>
+      <div style="background:#0f1629;border-radius:12px;padding:20px;margin-bottom:16px">
+        <h2 style="color:#10b981;margin:0 0 16px">New Website Order</h2>
+        <table style="width:100%;border-collapse:collapse">
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px;width:140px">Customer Name:</td><td style="color:#fff;font-weight:600;font-size:13px">${order.name}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Phone:</td><td style="color:#38bdf8;font-weight:600;font-size:13px">${order.phone}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Email:</td><td style="color:#38bdf8;font-size:13px">${order.email}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Business Name:</td><td style="color:#fff;font-weight:700;font-size:14px">${order.business}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Category:</td><td style="color:#fff;font-size:13px">${order.category}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Location:</td><td style="color:#fff;font-size:13px">${order.city}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Domain:</td><td style="color:#f59e0b;font-weight:600;font-size:13px">${order.domain}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Colour Theme:</td><td style="color:#fff;font-size:13px">${order.colorTheme}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px;font-weight:700">TOTAL TO CHARGE:</td><td style="color:#10b981;font-weight:800;font-size:16px">${order.totalCharge}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Order Time:</td><td style="color:#fff;font-size:13px">${order.orderTime}</td></tr>
+        </table>
+      </div>
+      <div style="background:#0f1629;border-radius:12px;padding:16px;margin-bottom:16px">
+        <div style="color:#64748b;font-size:12px;margin-bottom:8px">BUSINESS DESCRIPTION:</div>
+        <div style="color:#e2e8f0;font-size:13px;line-height:1.6">${order.description}</div>
+      </div>
+      ${order.extraRequests ? '<div style="background:#0f1629;border-radius:12px;padding:16px;margin-bottom:16px"><div style="color:#64748b;font-size:12px;margin-bottom:8px">SPECIAL REQUESTS:</div><div style="color:#e2e8f0;font-size:13px;line-height:1.6">' + order.extraRequests + '</div></div>' : ''}
+      <div style="background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.2);border-radius:10px;padding:16px">
+        <div style="color:#38bdf8;font-weight:700;font-size:13px;margin-bottom:8px">ACTION REQUIRED:</div>
+        <div style="color:#94a3b8;font-size:13px">1. Contact ${order.name} on ${order.phone} within 24 hours to confirm<br>2. Build website within 72 hours<br>3. Purchase domain if needed: ${order.domain}<br>4. Collect payment: <strong style="color:#10b981">${order.totalCharge}</strong></div>
+      </div>
+    </div>`;
+
+  await sendEmail('lethumkapu561@gmail.com', 'NEW WEBSITE ORDER - ' + order.business + ' (' + order.totalCharge + ')', html);
+  res.json({ success: true });
+});
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

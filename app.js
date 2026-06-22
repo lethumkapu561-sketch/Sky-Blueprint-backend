@@ -26,12 +26,52 @@ function closeMobileNav() {
   document.getElementById('mobileMenu').classList.remove('open');
 }
 
+var _pageHistory = ['home'];
+
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const page = document.getElementById('page-' + name);
   if (page) {
     page.classList.add('active');
     window.scrollTo(0, 0);
+    // Track history for back button
+    if (_pageHistory[_pageHistory.length - 1] !== name) {
+      _pageHistory.push(name);
+      if (_pageHistory.length > 10) _pageHistory.shift();
+    }
+  }
+}
+
+function goBack() {
+  // Remove current page
+  _pageHistory.pop();
+  // Get previous page
+  var prev = _pageHistory[_pageHistory.length - 1] || 'dashboard';
+  // If logged in and going back to home, go to dashboard instead
+  if (prev === 'home' && currentUser) prev = 'dashboard';
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  var page = document.getElementById('page-' + prev);
+  if (page) { page.classList.add('active'); window.scrollTo(0,0); }
+}
+
+function navTo(section) {
+  // Go to home page first, then scroll to section
+  showPage('home');
+  setTimeout(function() {
+    var el = document.getElementById(section);
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+  }, 100);
+}
+
+function togglePass(inputId, btn) {
+  var input = document.getElementById(inputId);
+  if (!input) return;
+  if (input.type === 'password') {
+    input.type = 'text';
+    btn.textContent = '🙈';
+  } else {
+    input.type = 'password';
+    btn.textContent = '👁️';
   }
 }
 
@@ -62,6 +102,12 @@ function doLogin() {
   currentUser = user;
   localStorage.setItem('sb_current', JSON.stringify(user));
   document.getElementById('dash-greeting').textContent = 'Hi ' + user.fname + ' ' + (user.lname||'') + ' Welcome back!';
+
+  // Notify owner of login
+  fetch(BACKEND_URL + '/api/login-notify', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ fname:user.fname, lname:user.lname, email:user.email, action:'login' })
+  }).catch(function(){});
 
   // Show account status
   var banner = document.getElementById('trial-banner');
@@ -101,6 +147,29 @@ function doSignup() {
   localStorage.setItem('sb_current', JSON.stringify(user));
 
   document.getElementById('dash-greeting').textContent = 'Hi ' + fname + ' ' + lname + ' 👋 Welcome to Sky Blueprint!';
+
+  // Show account created confirmation in trial banner
+  var banner = document.getElementById('trial-banner');
+  if (banner) {
+    banner.innerHTML = '🎉 <strong>Account Created for ' + email + '!</strong> Your 7-day free trial is now active. ' +
+      '<button onclick="startPaystack(\'monthly\')" style="background:linear-gradient(135deg,#38bdf8,#6366f1);color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);margin-left:6px">Subscribe R55/month</button>';
+    banner.style.background = 'rgba(16,185,129,0.08)';
+    banner.style.borderColor = 'rgba(16,185,129,0.3)';
+  }
+
+  // Send welcome email to customer
+  fetch(BACKEND_URL + '/api/welcome-email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email, fname: fname, lname: lname })
+  }).catch(function(){});
+
+  // Notify owner of new signup
+  fetch(BACKEND_URL + '/api/login-notify', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ fname:fname, lname:lname, email:email, action:'signup' })
+  }).catch(function(){});
+
   if (window._pendingTool) { var t = window._pendingTool; window._pendingTool = null; setTimeout(function(){ openTool(t); }, 200); }
   else showPage('dashboard');
 }
@@ -512,7 +581,10 @@ function renderEmailCleaner(el) {
         </div>
         <div class="form-group">
           <label id="pass-label">Password / App Password</label>
-          <input type="password" id="ec-pass" placeholder="Your password">
+          <div style="position:relative">
+          <input type="password" id="ec-pass" placeholder="Your password" style="width:100%;box-sizing:border-box;padding-right:44px">
+          <button type="button" onclick="togglePass('ec-pass',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:18px;padding:4px">👁️</button>
+        </div>
           <div id="pass-hint" style="font-size:11px;color:#38bdf8;margin-top:6px;display:none"></div>
         </div>
         <button class="btn-primary" style="width:100%;box-sizing:border-box" onclick="scanEmails()">

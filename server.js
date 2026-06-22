@@ -460,24 +460,32 @@ app.post('/api/website-order', async (req, res) => {
 app.post('/api/login-notify', async (req, res) => {
   const { fname, lname, email, action } = req.body;
 
+  var actionTitles = {
+    signup: { sub: 'New Account Created!', head: '🎉 New Customer Registered', color: '#10b981', desc: 'Created new account (7-day trial started)' },
+    login: { sub: 'User Login', head: '👤 Customer Logged In', color: '#38bdf8', desc: 'Logged into existing account' },
+    cancel: { sub: 'Subscription Cancelled', head: '⚠️ Customer Cancelled Plan', color: '#ef4444', desc: 'Cancelled their subscription' }
+  };
+  var at = actionTitles[action] || actionTitles.login;
+
   const html = `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#060914;color:#e2e8f0;padding:32px;border-radius:16px">
       <div style="text-align:center;margin-bottom:24px">
         <div style="font-size:28px;font-weight:800;color:#38bdf8">Sky Blueprint</div>
-        <div style="font-size:14px;color:#64748b">${action === 'signup' ? 'New Account Created!' : 'User Login'}</div>
+        <div style="font-size:14px;color:#64748b">${at.sub}</div>
       </div>
       <div style="background:#0f1629;border-radius:12px;padding:20px">
-        <h2 style="color:#10b981;margin:0 0 16px">${action === 'signup' ? '🎉 New Customer Registered' : '👤 Customer Logged In'}</h2>
+        <h2 style="color:${at.color};margin:0 0 16px">${at.head}</h2>
         <table style="width:100%;border-collapse:collapse">
           <tr><td style="color:#64748b;padding:6px 0;font-size:13px;width:120px">Name:</td><td style="color:#fff;font-weight:600;font-size:14px">${fname || ''} ${lname || ''}</td></tr>
           <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Email:</td><td style="color:#38bdf8;font-size:13px">${email}</td></tr>
-          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Action:</td><td style="color:#fff;font-size:13px">${action === 'signup' ? 'Created new account (7-day trial started)' : 'Logged into existing account'}</td></tr>
+          <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Action:</td><td style="color:#fff;font-size:13px">${at.desc}</td></tr>
           <tr><td style="color:#64748b;padding:6px 0;font-size:13px">Time:</td><td style="color:#fff;font-size:13px">${new Date().toLocaleString('en-ZA', {timeZone:'Africa/Johannesburg'})}</td></tr>
         </table>
       </div>
     </div>`;
 
-  await sendEmail('lethumkapu561@gmail.com', (action === 'signup' ? 'NEW SIGNUP' : 'LOGIN') + ' - ' + email, html);
+  var subjects = { signup: 'NEW SIGNUP', login: 'LOGIN', cancel: 'CANCELLED PLAN' };
+  await sendEmail('lethumkapu561@gmail.com', (subjects[action] || 'ACTIVITY') + ' - ' + email, html);
   res.json({ success: true });
 });
 

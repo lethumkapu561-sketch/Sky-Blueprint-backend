@@ -94,9 +94,11 @@ app.post('/api/scan-emails', async (req, res) => {
     };
 
     const cfg = configs[provider] || configs.gmail;
+    // Gmail/Yahoo app passwords must have spaces removed
+    const cleanPassword = password ? password.replace(/\s+/g, '') : '';
     const imap = new Imap({
       user: email,
-      password: password,
+      password: cleanPassword,
       host: cfg.host,
       port: cfg.port,
       tls: true,

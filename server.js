@@ -463,7 +463,9 @@ app.post('/api/login-notify', async (req, res) => {
   var actionTitles = {
     signup: { sub: 'New Account Created!', head: '🎉 New Customer Registered', color: '#10b981', desc: 'Created new account (7-day trial started)' },
     login: { sub: 'User Login', head: '👤 Customer Logged In', color: '#38bdf8', desc: 'Logged into existing account' },
-    cancel: { sub: 'Subscription Cancelled', head: '⚠️ Customer Cancelled Plan', color: '#ef4444', desc: 'Cancelled their subscription' }
+    cancel: { sub: 'Subscription Cancelled', head: '⚠️ Customer Cancelled Plan', color: '#ef4444', desc: 'Cancelled their subscription' },
+    'subscribe-monthly': { sub: 'New Paid Subscriber!', head: '💰 New MONTHLY Subscriber (R55/month)', color: '#10b981', desc: 'Subscribed to Monthly plan - R55/month recurring' },
+    'subscribe-yearly': { sub: 'New Paid Subscriber!', head: '💰 New 3-YEAR Subscriber (R1,980/year)', color: '#10b981', desc: 'Subscribed to 3-Year plan - R1,980/year' }
   };
   var at = actionTitles[action] || actionTitles.login;
 
@@ -484,7 +486,7 @@ app.post('/api/login-notify', async (req, res) => {
       </div>
     </div>`;
 
-  var subjects = { signup: 'NEW SIGNUP', login: 'LOGIN', cancel: 'CANCELLED PLAN' };
+  var subjects = { signup: 'NEW SIGNUP', login: 'LOGIN', cancel: 'CANCELLED PLAN', 'subscribe-monthly': 'NEW PAID SUBSCRIBER (Monthly R55)', 'subscribe-yearly': 'NEW PAID SUBSCRIBER (3-Year R1980)' };
   await sendEmail('lethumkapu561@gmail.com', (subjects[action] || 'ACTIVITY') + ' - ' + email, html);
   res.json({ success: true });
 });

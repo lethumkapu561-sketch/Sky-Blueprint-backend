@@ -492,6 +492,41 @@ app.post('/api/login-notify', async (req, res) => {
 });
 
 
+
+// ── LEARNERSHIP EMAIL - sends opportunities to the user ──
+app.post('/api/learnership-email', async (req, res) => {
+  const { name, email, field, province, type, opportunities } = req.body;
+
+  const oppsHtml = (opportunities || []).map(function(o) {
+    return '<div style="background:#0f1629;border-radius:10px;padding:16px;margin-bottom:12px">' +
+      '<div style="color:#38bdf8;font-weight:700;font-size:15px;margin-bottom:6px">' + o.name + '</div>' +
+      '<div style="color:#94a3b8;font-size:13px;margin-bottom:10px">' + o.desc + '</div>' +
+      '<a href="' + o.url + '" style="display:inline-block;background:#38bdf8;color:#fff;text-decoration:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600">Apply Now →</a>' +
+      '</div>';
+  }).join('');
+
+  const html = '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#060914;color:#e2e8f0;padding:32px;border-radius:16px">' +
+    '<div style="text-align:center;margin-bottom:24px">' +
+    '<div style="font-size:28px;font-weight:800;color:#38bdf8">Sky Blueprint</div>' +
+    '<div style="font-size:14px;color:#64748b">Your Learnership & Internship Matches</div>' +
+    '</div>' +
+    '<p style="color:#e2e8f0;font-size:15px">Hi ' + name + ',</p>' +
+    '<p style="color:#94a3b8;font-size:14px;line-height:1.6">Here are the best ' + (type === 'both' ? 'learnership and internship' : type) + ' opportunities for you in <strong style="color:#fff">' + field + '</strong> (' + province + '). Click any link to apply directly:</p>' +
+    '<div style="margin:20px 0">' + oppsHtml + '</div>' +
+    '<div style="background:rgba(56,189,248,0.08);border-radius:10px;padding:16px;margin-top:16px">' +
+    '<div style="color:#38bdf8;font-weight:700;font-size:13px;margin-bottom:8px">💡 Tips to get selected:</div>' +
+    '<div style="color:#94a3b8;font-size:13px;line-height:1.7">• Complete your full profile on each site<br>• Apply early — positions close fast<br>• Have your CV and ID ready (use our CV Builder!)<br>• Apply to multiple opportunities to increase your chances</div>' +
+    '</div>' +
+    '<p style="color:#64748b;font-size:12px;margin-top:20px;text-align:center">Sent by Sky Blueprint — Your Digital Life, Unified</p>' +
+    '</div>';
+
+  await sendEmail(email, 'Your Learnership & Internship Matches - Sky Blueprint', html);
+  // Also notify owner
+  await sendEmail('lethumkapu561@gmail.com', 'Learnership search by ' + name + ' (' + email + ')', '<p>' + name + ' (' + email + ') searched for ' + type + ' in ' + field + ', ' + province + '</p>');
+  res.json({ success: true });
+});
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

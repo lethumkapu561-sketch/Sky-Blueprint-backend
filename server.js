@@ -527,6 +527,88 @@ app.post('/api/learnership-email', async (req, res) => {
 });
 
 
+
+// ── REVIEWS ──
+const fs = require('fs');
+const REVIEWS_FILE = '/tmp/sky_reviews.json';
+
+function readReviews() {
+  try { return JSON.parse(fs.readFileSync(REVIEWS_FILE, 'utf8')); }
+  catch(e) { return []; }
+}
+function writeReviews(list) {
+  try { fs.writeFileSync(REVIEWS_FILE, JSON.stringify(list)); } catch(e) {}
+}
+
+// Get all reviews
+app.get('/api/reviews', (req, res) => {
+  res.json({ reviews: readReviews() });
+});
+
+// Post a new review
+app.post('/api/reviews', async (req, res) => {
+  const { rating, name, city, text } = req.body;
+  if (!rating || !name || !text) {
+    return res.status(400).json({ success: false, error: 'Missing fields' });
+  }
+  var reviews = readReviews();
+  var review = {
+    rating: Math.max(1, Math.min(5, parseInt(rating))),
+    name: String(name).substring(0, 60),
+    city: String(city || '').substring(0, 60),
+    text: String(text).substring(0, 500),
+    date: new Date().toISOString()
+  };
+  reviews.push(review);
+  writeReviews(reviews);
+
+  // Notify owner of new review
+  try {
+    await sendEmail('lethumkapu561@gmail.com', 'New Sky Blueprint Review (' + review.rating + ' stars)',
+      '<div style="font-family:Arial,sans-serif"><h2>New Review Posted</h2>' +
+      '<p><strong>Rating:</strong> ' + review.rating + ' / 5 stars</p>' +
+      '<p><strong>Name:</strong> ' + review.name + '</p>' +
+      '<p><strong>City:</strong> ' + (review.city||'Not given') + '</p>' +
+      '<p><strong>Review:</strong> "' + review.text + '"</p></div>');
+  } catch(e) {}
+
+  res.json({ success: true });
+});
+
+
+
+// ── REVIEWS - stored in memory (simple, resets on redeploy) ──
+var siteReviews = [];
+
+app.get('/api/get-reviews', (req, res) => {
+  res.json({ reviews: siteReviews });
+});
+
+app.post('/api/add-review', async (req, res) => {
+  const { name, city, rating, text } = req.body;
+  if (!name || !rating || !text) return res.status(400).json({ error: 'missing fields' });
+
+  const review = { name: name, city: city || '', rating: parseInt(rating), text: text, date: Date.now() };
+  siteReviews.unshift(review);
+  // Keep max 100 reviews
+  if (siteReviews.length > 100) siteReviews = siteReviews.slice(0, 100);
+
+  // Notify owner of new review
+  try {
+    const stars = '★'.repeat(review.rating);
+    await sendEmail('lethumkapu561@gmail.com', 'New Review (' + review.rating + '★) from ' + name,
+      '<div style="font-family:Arial,sans-serif;padding:20px;background:#060914;color:#e2e8f0;border-radius:12px">' +
+      '<h2 style="color:#38bdf8">New Sky Blueprint Review</h2>' +
+      '<p style="color:#fbbf24;font-size:20px">' + stars + '</p>' +
+      '<p><strong>' + name + '</strong>' + (city ? ' from ' + city : '') + '</p>' +
+      '<p style="color:#94a3b8;font-style:italic">"' + text + '"</p>' +
+      '</div>');
+  } catch(e) {}
+
+  res.json({ success: true, reviews: siteReviews });
+});
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

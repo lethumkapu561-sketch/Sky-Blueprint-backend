@@ -609,6 +609,25 @@ app.post('/api/add-review', async (req, res) => {
 });
 
 
+
+// ── TEMPLATE ORDER - notify owner when someone buys a template ──
+app.post('/api/template-order', async (req, res) => {
+  const { templateName, price, email, name } = req.body;
+  try {
+    await sendEmail('lethumkapu561@gmail.com', 'TEMPLATE SALE: ' + templateName + ' (R' + price + ')',
+      '<div style="font-family:Arial,sans-serif;padding:20px;background:#060914;color:#e2e8f0;border-radius:12px">' +
+      '<h2 style="color:#10b981">💰 New Template Purchase</h2>' +
+      '<p><strong>Template:</strong> ' + templateName + '</p>' +
+      '<p><strong>Price:</strong> R' + price + '</p>' +
+      '<p><strong>Buyer:</strong> ' + (name||'') + '</p>' +
+      '<p><strong>Email:</strong> ' + email + '</p>' +
+      '<p style="color:#f59e0b;margin-top:16px">⚠️ ACTION: Email the template file to ' + email + '</p>' +
+      '</div>');
+  } catch(e) {}
+  res.json({ success: true });
+});
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

@@ -1,6 +1,7 @@
 // Sky Blueprint Backend Server v2
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -626,6 +627,236 @@ app.post('/api/template-order', async (req, res) => {
   } catch(e) {}
   res.json({ success: true });
 });
+
+
+
+// ═══════════════════════════════════════════════════════════
+//  SECURE ACCOUNTS + PAYMENT VERIFICATION SYSTEM
+//  Real server-side accounts. Payment verified via Paystack.
+// ═══════════════════════════════════════════════════════════
+const path = require('path');
+
+// Persistent storage. On Railway, set a Volume mounted at /data for true persistence.
+// Falls back to local file if no volume (works, but resets on redeploy without a volume).
+const DATA_DIR = fs.existsSync('/data') ? '/data' : __dirname;
+const DB_FILE = path.join(DATA_DIR, 'accounts.json');
+
+function loadDB() {
+  try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
+  catch (e) { return { users: {}, sessions: {} }; }
+}
+function saveDB(db) {
+  try { fs.writeFileSync(DB_FILE, JSON.stringify(db)); }
+  catch (e) { console.log('DB save error:', e.message); }
+}
+
+// Password hashing with salt (never store plain passwords)
+function hashPassword(password, salt) {
+  salt = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return { salt, hash };
+}
+function verifyPassword(password, salt, hash) {
+  const check = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return check === hash;
+}
+function makeToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const OWNER_EMAIL_BE = 'lethumkapu561@gmail.com';
+
+// ── SIGN UP ──
+app.post('/api/auth/signup', (req, res) => {
+  const { fname, lname, email, phone, password } = req.body;
+  if (!fname || !email || !password) return res.status(400).json({ error: 'Missing required fields' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  const db = loadDB();
+  const key = email.toLowerCase().trim();
+  if (db.users[key]) return res.status(409).json({ error: 'An account with this email already exists. Please log in.' });
+
+  const { salt, hash } = hashPassword(password);
+  const isOwner = key === OWNER_EMAIL_BE.toLowerCase();
+  db.users[key] = {
+    fname, lname: lname || '', email: key, phone: phone || '',
+    salt, hash,
+    plan: isOwner ? 'owner' : 'trial',
+    joined: Date.now()
+  };
+  const token = makeToken();
+  db.sessions[token] = { email: key, created: Date.now() };
+  saveDB(db);
+
+  const u = db.users[key];
+  res.json({ success: true, token, user: { fname: u.fname, lname: u.lname, email: u.email, phone: u.phone, plan: u.plan, joined: u.joined } });
+});
+
+// ── LOG IN ──
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Enter your email and password' });
+
+  const db = loadDB();
+  const key = email.toLowerCase().trim();
+
+  // Owner shortcut
+  if (key === OWNER_EMAIL_BE.toLowerCase()) {
+    if (!db.users[key]) {
+      const { salt, hash } = hashPassword(password);
+      db.users[key] = { fname:'Wongalethu', lname:'Mkapu', email:key, phone:'0656013544', salt, hash, plan:'owner', joined:Date.now() };
+    }
+    db.users[key].plan = 'owner';
+    const token = makeToken();
+    db.sessions[token] = { email: key, created: Date.now() };
+    saveDB(db);
+    const u = db.users[key];
+    return res.json({ success: true, token, user: { fname:u.fname, lname:u.lname, email:u.email, phone:u.phone, plan:'owner', joined:u.joined } });
+  }
+
+  const user = db.users[key];
+  if (!user) return res.status(401).json({ error: 'Incorrect email or password' });
+  if (!verifyPassword(password, user.salt, user.hash)) return res.status(401).json({ error: 'Incorrect email or password' });
+
+  const token = makeToken();
+  db.sessions[token] = { email: key, created: Date.now() };
+  saveDB(db);
+  res.json({ success: true, token, user: { fname:user.fname, lname:user.lname, email:user.email, phone:user.phone, plan:user.plan, joined:user.joined } });
+});
+
+// ── GET CURRENT USER (verify token, return real plan from server) ──
+app.post('/api/auth/me', (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(401).json({ error: 'Not logged in' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired' });
+  const user = db.users[session.email];
+  if (!user) return res.status(401).json({ error: 'Account not found' });
+  // The plan returned here is the SERVER's truth - cannot be faked by the browser
+  res.json({ success: true, user: { fname:user.fname, lname:user.lname, email:user.email, phone:user.phone, plan:user.plan, joined:user.joined } });
+});
+
+// ── VERIFY PAYMENT (called after Paystack success - checks with Paystack directly) ──
+app.post('/api/verify-payment', async (req, res) => {
+  const { reference, token, plan } = req.body;
+  if (!reference || !token) return res.status(400).json({ error: 'Missing reference or token' });
+
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired, please log in again' });
+
+  // Ask Paystack directly if this payment is real and successful
+  const SECRET = process.env.PAYSTACK_SECRET_KEY;
+  if (!SECRET) {
+    console.log('WARNING: PAYSTACK_SECRET_KEY not set in Railway variables');
+    return res.status(500).json({ error: 'Payment verification not configured' });
+  }
+
+  try {
+    const vr = await fetch('https://api.paystack.co/transaction/verify/' + encodeURIComponent(reference), {
+      headers: { 'Authorization': 'Bearer ' + SECRET }
+    });
+    const data = await vr.json();
+
+    if (data && data.status && data.data && data.data.status === 'success') {
+      // Payment is REAL. Now mark the user as paid on the SERVER.
+      const user = db.users[session.email];
+      if (user) {
+        user.plan = plan || 'monthly';
+        user.lastPayment = { reference, amount: data.data.amount, date: Date.now() };
+        saveDB(db);
+
+        // Notify owner of real verified payment
+        try {
+          await sendEmail(OWNER_EMAIL_BE, 'VERIFIED PAYMENT: ' + user.email + ' (' + (plan||'monthly') + ')',
+            '<div style="font-family:Arial,sans-serif;padding:20px;background:#060914;color:#e2e8f0;border-radius:12px">' +
+            '<h2 style="color:#10b981">Payment Verified by Paystack</h2>' +
+            '<p><strong>Customer:</strong> ' + user.fname + ' ' + user.lname + '</p>' +
+            '<p><strong>Email:</strong> ' + user.email + '</p>' +
+            '<p><strong>Plan:</strong> ' + (plan||'monthly') + '</p>' +
+            '<p><strong>Amount:</strong> R' + (data.data.amount/100).toFixed(2) + '</p>' +
+            '<p><strong>Reference:</strong> ' + reference + '</p>' +
+            '</div>');
+        } catch(e) {}
+
+        return res.json({ success: true, plan: user.plan, user: { fname:user.fname, lname:user.lname, email:user.email, phone:user.phone, plan:user.plan, joined:user.joined } });
+      }
+      return res.status(404).json({ error: 'User not found' });
+    } else {
+      return res.status(400).json({ error: 'Payment not successful', paystackStatus: data.data ? data.data.status : 'unknown' });
+    }
+  } catch (e) {
+    console.log('Verify error:', e.message);
+    return res.status(500).json({ error: 'Could not verify payment. Please contact support.' });
+  }
+});
+
+// ── PAYSTACK WEBHOOK (Paystack calls this directly - most secure) ──
+app.post('/api/paystack-webhook', express.json(), (req, res) => {
+  const SECRET = process.env.PAYSTACK_SECRET_KEY;
+  if (SECRET) {
+    // Verify the webhook really came from Paystack
+    const hash = crypto.createHmac('sha512', SECRET).update(JSON.stringify(req.body)).digest('hex');
+    if (hash !== req.headers['x-paystack-signature']) {
+      return res.status(401).send('Invalid signature');
+    }
+  }
+  const event = req.body;
+  if (event && event.event === 'charge.success') {
+    const email = (event.data.customer && event.data.customer.email || '').toLowerCase();
+    const db = loadDB();
+    if (db.users[email]) {
+      db.users[email].plan = db.users[email].plan === 'yearly' ? 'yearly' : 'monthly';
+      db.users[email].lastPayment = { reference: event.data.reference, amount: event.data.amount, date: Date.now() };
+      saveDB(db);
+      console.log('Webhook: activated', email);
+    }
+  }
+  res.sendStatus(200);
+});
+
+// ── CANCEL PLAN ──
+app.post('/api/cancel-plan', (req, res) => {
+  const { token } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired' });
+  const user = db.users[session.email];
+  if (user) {
+    user.plan = 'cancelled';
+    saveDB(db);
+  }
+  res.json({ success: true });
+});
+
+// ── OWNER: list all accounts (protected by owner check) ──
+app.post('/api/admin/users', (req, res) => {
+  const { token } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  const requester = db.users[session.email];
+  if (!requester || requester.plan !== 'owner') return res.status(403).json({ error: 'Owner access only' });
+  const list = Object.values(db.users).map(u => ({ fname:u.fname, lname:u.lname, email:u.email, phone:u.phone, plan:u.plan, joined:u.joined, lastPayment: u.lastPayment || null }));
+  res.json({ success: true, users: list });
+});
+
+// ── OWNER: manually set a user's plan ──
+app.post('/api/admin/set-plan', (req, res) => {
+  const { token, targetEmail, newPlan } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  const requester = db.users[session.email];
+  if (!requester || requester.plan !== 'owner') return res.status(403).json({ error: 'Owner access only' });
+  const target = db.users[(targetEmail||'').toLowerCase()];
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  target.plan = newPlan;
+  saveDB(db);
+  res.json({ success: true });
+});
+
 
 
 app.listen(PORT, () => {

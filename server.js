@@ -638,7 +638,7 @@ const path = require('path');
 
 // Persistent storage. On Railway, set a Volume mounted at /data for true persistence.
 // Falls back to local file if no volume (works, but resets on redeploy without a volume).
-const DATA_DIR = fs.existsSync('/data') ? '/data' : __dirname;
+const DATA_DIR = fs.existsSync('/app/data') ? '/app/data' : (fs.existsSync('/data') ? '/data' : __dirname);
 const DB_FILE = path.join(DATA_DIR, 'accounts.json');
 
 function loadDB() {

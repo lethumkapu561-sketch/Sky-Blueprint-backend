@@ -859,6 +859,68 @@ app.post('/api/admin/set-plan', (req, res) => {
 
 
 
+
+// ═══════════════════════════════════════════════════════════
+//  CUSTOMER MANAGER - each business owner's private client list
+// ═══════════════════════════════════════════════════════════
+
+// Get all customers for the logged-in user
+app.post('/api/customers/list', (req, res) => {
+  const { token } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  if (!db.customers) db.customers = {};
+  const list = db.customers[session.email] || [];
+  res.json({ success: true, customers: list });
+});
+
+// Add a new customer
+app.post('/api/customers/add', (req, res) => {
+  const { token, customer } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  if (!customer || !customer.name) return res.status(400).json({ error: 'Customer name required' });
+  if (!db.customers) db.customers = {};
+  if (!db.customers[session.email]) db.customers[session.email] = [];
+  customer.id = 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+  customer.created = Date.now();
+  db.customers[session.email].unshift(customer);
+  saveDB(db);
+  res.json({ success: true, customer: customer });
+});
+
+// Update an existing customer
+app.post('/api/customers/update', (req, res) => {
+  const { token, customer } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  if (!db.customers || !db.customers[session.email]) return res.status(404).json({ error: 'No customers found' });
+  const list = db.customers[session.email];
+  const idx = list.findIndex(c => c.id === customer.id);
+  if (idx === -1) return res.status(404).json({ error: 'Customer not found' });
+  // preserve id and created
+  customer.created = list[idx].created;
+  list[idx] = customer;
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// Delete a customer
+app.post('/api/customers/delete', (req, res) => {
+  const { token, customerId } = req.body;
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Not logged in' });
+  if (!db.customers || !db.customers[session.email]) return res.status(404).json({ error: 'No customers' });
+  db.customers[session.email] = db.customers[session.email].filter(c => c.id !== customerId);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

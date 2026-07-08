@@ -921,6 +921,91 @@ app.post('/api/customers/delete', (req, res) => {
 });
 
 
+
+// ═══════════════════════════════════════════════════════════
+//  SERVER-SIDE VIDEO COMPRESSION
+//  Runs on Railway's server (not the customer's phone) - so
+//  nothing on their device ever freezes or runs out of memory.
+// ═══════════════════════════════════════════════════════════
+const multer = require('multer');
+const ffmpegPath = require('ffmpeg-static');
+const ffmpeg = require('fluent-ffmpeg');
+const os = require('os');
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+// Store uploads temporarily in the OS temp folder, max 300MB, videos only
+const upload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: 300 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('video/')) cb(null, true);
+    else cb(new Error('Only video files are allowed'));
+  }
+});
+
+app.post('/api/compress-video', upload.single('video'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No video file received' });
+
+  const inputPath = req.file.path;
+  const outputPath = inputPath + '-compressed.mp4';
+  // Target size in MB, sent by the frontend (defaults to 10MB)
+  const targetMB = parseFloat(req.body.targetMB) || 10;
+
+  try {
+    // First, find out how long the video is, so we can calculate the right bitrate
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (err) {
+        cleanup(inputPath, outputPath);
+        return res.status(400).json({ error: 'Could not read this video file. It may be corrupted or an unsupported format.' });
+      }
+
+      const duration = metadata.format.duration; // seconds
+      if (!duration || duration <= 0) {
+        cleanup(inputPath, outputPath);
+        return res.status(400).json({ error: 'Could not determine video length.' });
+      }
+
+      // Calculate bitrate to hit the target size, leaving a small safety margin
+      const audioKbps = 64;
+      const safeMB = targetMB * 0.93;
+      const totalKbps = (safeMB * 8 * 1024) / duration;
+      let videoKbps = Math.max(100, Math.round(totalKbps - audioKbps)); // never go below 100kbps (unwatchable)
+
+      ffmpeg(inputPath)
+        .videoCodec('libx264')
+        .videoBitrate(videoKbps)
+        .audioCodec('aac')
+        .audioBitrate(audioKbps)
+        .outputOptions(['-preset veryfast', '-movflags +faststart'])
+        .on('error', (ffErr) => {
+          cleanup(inputPath, outputPath);
+          console.log('ffmpeg error:', ffErr.message);
+          res.status(500).json({ error: 'Could not compress this video. Please try a different file.' });
+        })
+        .on('end', () => {
+          const fs2 = require('fs');
+          fs2.readFile(outputPath, (readErr, data) => {
+            cleanup(inputPath, outputPath);
+            if (readErr) return res.status(500).json({ error: 'Could not read compressed file.' });
+            res.set('Content-Type', 'video/mp4');
+            res.set('Content-Disposition', 'attachment; filename="compressed.mp4"');
+            res.send(data);
+          });
+        })
+        .save(outputPath);
+    });
+  } catch (e) {
+    cleanup(inputPath, outputPath);
+    res.status(500).json({ error: 'Server error while compressing video.' });
+  }
+});
+
+function cleanup(...paths) {
+  const fs2 = require('fs');
+  paths.forEach(p => { try { if (fs2.existsSync(p)) fs2.unlinkSync(p); } catch(e) {} });
+}
+
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

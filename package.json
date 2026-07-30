@@ -1,7 +1,7 @@
 {
   "name": "sky-blueprint-backend",
-  "version": "2.0.0",
-  "description": "Sky Blueprint Backend — AI Mentor, Auth, Email, Reviews",
+  "version": "1.0.0",
+  "description": "Sky Blueprint Backend - Email Cleaner & CV Matcher",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,13 +10,12 @@
     "cors": "^2.8.6",
     "dotenv": "^16.3.1",
     "express": "^4.22.2",
-    "nodemailer": "^6.10.1",
     "imap": "^0.8.19",
     "mailparser": "^3.9.10",
     "node-imap": "^0.9.6",
+    "nodemailer": "^6.10.1",
     "multer": "^1.4.5-lts.1",
     "ffmpeg-static": "^5.2.0",
     "fluent-ffmpeg": "^2.1.2"
-  },
-  "engines": { "node": ">=18.0.0" }
+  }
 }

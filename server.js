@@ -1006,6 +1006,55 @@ function cleanup(...paths) {
 }
 
 
+// ═══════════════════════════════════════════════════════════
+//  AI BUSINESS MENTOR + SKY GUIDE — secure server-side proxy.
+//  The API key lives ONLY here on the server, never in the browser.
+//  Set ANTHROPIC_API_KEY in your Railway environment variables.
+// ═══════════════════════════════════════════════════════════
+app.post('/api/ai-mentor', async (req, res) => {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'AI Mentor is not configured yet. Please contact support.' });
+    }
+    const { messages, mode } = req.body;
+    if (!Array.isArray(messages) || !messages.length) {
+      return res.status(400).json({ error: 'No message provided.' });
+    }
+
+    const systemPrompts = {
+      mentor: 'You are a warm, practical AI Business Mentor for Sky Blueprint, specialising in South African entrepreneurship. You know SA business law, CIPC registration (R175 fee, cipc.co.za), SARS eFiling, SMME funding (SEFA, IDC, NEF, Khula), BEE/BBBEE compliance, load shedding business strategies, and general business growth for the African market. Give clear, actionable advice using South African context. Mention rands, SA government departments, and local resources. Be encouraging and specific.',
+      guide: 'You are Sky Guide, the friendly assistant inside Sky Blueprint — a South African digital platform with 13 tools: Website Builder, AI Email Secretary, CV Builder, Learnerships & Internships, Find My Phone, AI Business Mentor, Reminders & Tasks, SA Map (free), Templates Store, PDF Tools, Customer Manager, File Compressor, and Image Editor. Pricing: R55/month for all tools, R1,980/year for the 3-year plan. Payments via Paystack. Keep answers short, simple and friendly, like explaining to someone new to technology.'
+    };
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        system: systemPrompts[mode] || systemPrompts.mentor,
+        messages: messages
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.log('Anthropic API error:', data);
+      return res.status(502).json({ error: data.error?.message || 'AI service error. Please try again.' });
+    }
+    const reply = data.content?.[0]?.text || 'Sorry, I could not respond. Please try again.';
+    res.json({ success: true, reply: reply });
+  } catch (e) {
+    console.log('AI mentor endpoint error:', e.message);
+    res.status(500).json({ error: 'Could not reach the AI service. Please try again.' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Sky Blueprint Backend v2 running on port ${PORT}`);
 });

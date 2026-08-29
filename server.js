@@ -948,41 +948,70 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
 
   const inputPath = req.file.path;
   const outputPath = inputPath + '-compressed.mp4';
-  // Target size in MB, sent by the frontend (defaults to 10MB)
   const targetMB = parseFloat(req.body.targetMB) || 10;
+  let finished = false;
+  let command = null;
+
+  // Railway's actual documented platform ceiling for a public HTTP request
+  // is 15 minutes. We stay safely under that (12 minutes) so the platform
+  // itself never cuts the connection mid-job.
+  const hardTimeout = setTimeout(() => {
+    if (finished) return;
+    finished = true;
+    if (command) { try { command.kill('SIGKILL'); } catch(e) {} }
+    cleanup(inputPath, outputPath);
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'This video is taking longer than 12 minutes to compress. Please try a shorter clip or a lower target size.' });
+    }
+  }, 720000);
 
   try {
-    // First, find out how long the video is, so we can calculate the right bitrate
     ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (finished) return;
       if (err) {
+        finished = true; clearTimeout(hardTimeout);
         cleanup(inputPath, outputPath);
         return res.status(400).json({ error: 'Could not read this video file. It may be corrupted or an unsupported format.' });
       }
 
-      const duration = metadata.format.duration; // seconds
+      const duration = metadata.format.duration;
       if (!duration || duration <= 0) {
+        finished = true; clearTimeout(hardTimeout);
         cleanup(inputPath, outputPath);
         return res.status(400).json({ error: 'Could not determine video length.' });
       }
 
-      // Calculate bitrate to hit the target size, leaving a small safety margin
+      // Raised generously now that we know Railway's real ceiling is 15
+      // minutes per request. Capping at 4 minutes of footage leaves a wide
+      // safety margin under our 12-minute hard timeout above, even if
+      // Railway's shared CPU runs several times slower than a dev machine.
+      if (duration > 240) {
+        finished = true; clearTimeout(hardTimeout);
+        cleanup(inputPath, outputPath);
+        return res.status(400).json({ error: 'This video is ' + Math.round(duration) + ' seconds long. To keep processing reliable, please use a clip under 4 minutes.' });
+      }
+
       const audioKbps = 64;
       const safeMB = targetMB * 0.93;
       const totalKbps = (safeMB * 8 * 1024) / duration;
-      let videoKbps = Math.max(100, Math.round(totalKbps - audioKbps)); // never go below 100kbps (unwatchable)
+      let videoKbps = Math.max(100, Math.round(totalKbps - audioKbps));
 
-      ffmpeg(inputPath)
+      command = ffmpeg(inputPath)
         .videoCodec('libx264')
         .videoBitrate(videoKbps)
         .audioCodec('aac')
         .audioBitrate(audioKbps)
         .outputOptions(['-preset veryfast', '-movflags +faststart'])
         .on('error', (ffErr) => {
+          if (finished) return;
+          finished = true; clearTimeout(hardTimeout);
           cleanup(inputPath, outputPath);
           console.log('ffmpeg error:', ffErr.message);
           res.status(500).json({ error: 'Could not compress this video. Please try a different file.' });
         })
         .on('end', () => {
+          if (finished) return;
+          finished = true; clearTimeout(hardTimeout);
           const fs2 = require('fs');
           fs2.readFile(outputPath, (readErr, data) => {
             cleanup(inputPath, outputPath);
@@ -995,8 +1024,11 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
         .save(outputPath);
     });
   } catch (e) {
-    cleanup(inputPath, outputPath);
-    res.status(500).json({ error: 'Server error while compressing video.' });
+    if (!finished) {
+      finished = true; clearTimeout(hardTimeout);
+      cleanup(inputPath, outputPath);
+      res.status(500).json({ error: 'Server error while compressing video.' });
+    }
   }
 });
 

@@ -664,11 +664,18 @@ function makeToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+// Stable, unique referral code derived from the user's email.
+// Same email always produces the same code, so links never break.
+function makeRefCode(email) {
+  return crypto.createHash('sha256').update(String(email).toLowerCase())
+    .digest('hex').replace(/[^a-z0-9]/gi,'').substring(0, 8).toUpperCase();
+}
+
 const OWNER_EMAIL_BE = 'lethumkapu561@gmail.com';
 
 // ── SIGN UP ──
 app.post('/api/auth/signup', (req, res) => {
-  const { fname, lname, email, phone, password } = req.body;
+  const { fname, lname, email, phone, password, refCode } = req.body;
   if (!fname || !email || !password) return res.status(400).json({ error: 'Missing required fields' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
@@ -678,11 +685,26 @@ app.post('/api/auth/signup', (req, res) => {
 
   const { salt, hash } = hashPassword(password);
   const isOwner = key === OWNER_EMAIL_BE.toLowerCase();
+
+  // Referral tracking: record WHO referred this person, if anyone.
+  // Self-referral is ignored so nobody can refer themselves for commission.
+  let referredBy = null;
+  if (refCode) {
+    const code = String(refCode).trim().toUpperCase();
+    const referrer = Object.keys(db.users).find(function(e){
+      return db.users[e].refCode === code;
+    });
+    if (referrer && referrer !== key) referredBy = referrer;
+  }
+
   db.users[key] = {
     fname, lname: lname || '', email: key, phone: phone || '',
     salt, hash,
     plan: isOwner ? 'owner' : 'trial',
-    joined: Date.now()
+    joined: Date.now(),
+    refCode: makeRefCode(key),
+    referredBy: referredBy,
+    commissionPaid: false
   };
   const token = makeToken();
   db.sessions[token] = { email: key, created: Date.now() };
@@ -765,6 +787,18 @@ app.post('/api/verify-payment', async (req, res) => {
       if (user) {
         user.plan = plan || 'monthly';
         user.lastPayment = { reference, amount: data.data.amount, date: Date.now() };
+
+        // AFFILIATE COMMISSION — only awarded on a REAL verified payment,
+        // and only once per referred customer (their first payment).
+        if (user.referredBy && !user.commissionPaid) {
+          const referrer = db.users[user.referredBy];
+          if (referrer) {
+            referrer.earnings = (referrer.earnings || 0) + 25; // R25 per paying referral
+            referrer.referralCount = (referrer.referralCount || 0) + 1;
+            user.commissionPaid = true;
+          }
+        }
+
         saveDB(db);
 
         // Notify owner of real verified payment
@@ -1001,7 +1035,11 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
         .videoBitrate(videoKbps)
         .audioCodec('aac')
         .audioBitrate(audioKbps)
-        .outputOptions(['-preset veryfast', '-movflags +faststart'])
+        // Cap resolution at 720p. Testing showed a 1080p video alone can push
+        // ffmpeg's memory to ~495MB — dangerously close to Railway's 512MB
+        // free-tier ceiling. 720p keeps real headroom for the rest of the
+        // server and other requests, while still looking sharp on a phone.
+        .outputOptions(['-preset veryfast', '-movflags +faststart', '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"])
         .on('error', (ffErr) => {
           if (finished) return;
           finished = true; clearTimeout(hardTimeout);
@@ -1013,12 +1051,21 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
           if (finished) return;
           finished = true; clearTimeout(hardTimeout);
           const fs2 = require('fs');
-          fs2.readFile(outputPath, (readErr, data) => {
-            cleanup(inputPath, outputPath);
-            if (readErr) return res.status(500).json({ error: 'Could not read compressed file.' });
+          // STREAM the file to the response instead of loading it fully into
+          // memory. Railway's containers can have as little as 512MB of RAM —
+          // reading a large video into a buffer on top of ffmpeg's own memory
+          // use can crash the process (the person sees "Failed to fetch").
+          // Streaming sends it in small chunks, so peak memory stays low no
+          // matter how large the compressed file is.
+          fs2.stat(outputPath, (statErr, stats) => {
+            if (statErr) { cleanup(inputPath, outputPath); return res.status(500).json({ error: 'Could not read compressed file.' }); }
             res.set('Content-Type', 'video/mp4');
+            res.set('Content-Length', stats.size);
             res.set('Content-Disposition', 'attachment; filename="compressed.mp4"');
-            res.send(data);
+            const readStream = fs2.createReadStream(outputPath);
+            readStream.on('error', () => { cleanup(inputPath, outputPath); if (!res.headersSent) res.status(500).json({ error: 'Could not read compressed file.' }); });
+            readStream.on('close', () => { cleanup(inputPath, outputPath); });
+            readStream.pipe(res);
           });
         })
         .save(outputPath);
@@ -1085,6 +1132,108 @@ app.post('/api/ai-mentor', async (req, res) => {
     console.log('AI mentor endpoint error:', e.message);
     res.status(500).json({ error: 'Could not reach the AI service. Please try again.' });
   }
+});
+
+// ═══════════════════════════════════════════════════════════
+//  AFFILIATE PROGRAMME
+// ═══════════════════════════════════════════════════════════
+
+// Get my referral code, stats and earnings
+app.post('/api/affiliate/stats', (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired, please log in again' });
+  const user = db.users[session.email];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // Backfill a referral code for accounts created before this feature existed
+  if (!user.refCode) { user.refCode = makeRefCode(user.email); saveDB(db); }
+
+  // Count everyone who signed up with this person's code
+  let signups = 0, paid = 0;
+  Object.keys(db.users).forEach(function(e){
+    if (db.users[e].referredBy === session.email) {
+      signups++;
+      if (db.users[e].commissionPaid) paid++;
+    }
+  });
+
+  res.json({
+    success: true,
+    refCode: user.refCode,
+    refLink: 'https://skyblueprint.company/?ref=' + user.refCode,
+    signups: signups,
+    paidReferrals: paid,
+    earnings: user.earnings || 0,
+    paidOut: user.paidOut || 0,
+    balance: (user.earnings || 0) - (user.paidOut || 0),
+    payout: user.payout || null
+  });
+});
+
+// Save how this affiliate wants to be paid (Skrill, bank, etc.)
+app.post('/api/affiliate/payout-details', (req, res) => {
+  const { token, method, account, accountName } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired, please log in again' });
+  const user = db.users[session.email];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  if (!method || !account) return res.status(400).json({ error: 'Please choose a payout method and enter your account details.' });
+
+  user.payout = {
+    method: String(method),
+    account: String(account).trim(),
+    accountName: String(accountName || '').trim(),
+    updated: Date.now()
+  };
+  saveDB(db);
+  res.json({ success: true, payout: user.payout });
+});
+
+// Request a payout of the current balance
+app.post('/api/affiliate/request-payout', async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired, please log in again' });
+  const user = db.users[session.email];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const balance = (user.earnings || 0) - (user.paidOut || 0);
+  const MIN_PAYOUT = 100; // R100 minimum, keeps transfer fees sensible
+  if (balance < MIN_PAYOUT) {
+    return res.status(400).json({ error: 'You need at least R' + MIN_PAYOUT + ' to request a payout. Your current balance is R' + balance + '.' });
+  }
+  if (!user.payout || !user.payout.account) {
+    return res.status(400).json({ error: 'Please add your payout details first.' });
+  }
+
+  user.payoutRequests = user.payoutRequests || [];
+  user.payoutRequests.push({ amount: balance, requested: Date.now(), status: 'pending' });
+  saveDB(db);
+
+  // Tell the owner so the payment can actually be sent
+  try {
+    await sendEmail(OWNER_EMAIL_BE, 'PAYOUT REQUEST: R' + balance + ' - ' + user.email,
+      '<div style="font-family:Arial,sans-serif;padding:20px;background:#060914;color:#e2e8f0;border-radius:12px">' +
+      '<h2 style="color:#38bdf8">Affiliate Payout Request</h2>' +
+      '<p><strong>Affiliate:</strong> ' + user.fname + ' ' + (user.lname||'') + '</p>' +
+      '<p><strong>Email:</strong> ' + user.email + '</p>' +
+      '<p><strong>Amount:</strong> R' + balance + '</p>' +
+      '<p><strong>Method:</strong> ' + user.payout.method + '</p>' +
+      '<p><strong>Account:</strong> ' + user.payout.account + '</p>' +
+      '<p><strong>Account name:</strong> ' + (user.payout.accountName || '-') + '</p>' +
+      '<p><strong>Paid referrals:</strong> ' + (user.referralCount || 0) + '</p>' +
+      '</div>');
+  } catch(e) { console.log('payout email failed:', e.message); }
+
+  res.json({ success: true, message: 'Payout requested. We will process it within 5 working days.', amount: balance });
 });
 
 app.listen(PORT, () => {

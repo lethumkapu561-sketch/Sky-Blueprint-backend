@@ -790,10 +790,21 @@ app.post('/api/verify-payment', async (req, res) => {
 
         // AFFILIATE COMMISSION — only awarded on a REAL verified payment,
         // and only once per referred customer (their first payment).
+        // Commissions are HELD for 30 days before becoming withdrawable.
+        // This protects against refunds and chargebacks: if a referred
+        // customer reverses their payment, we can cancel the commission
+        // before any money leaves the business.
         if (user.referredBy && !user.commissionPaid) {
           const referrer = db.users[user.referredBy];
           if (referrer) {
-            referrer.earnings = (referrer.earnings || 0) + 25; // R25 per paying referral
+            referrer.pendingCommissions = referrer.pendingCommissions || [];
+            referrer.pendingCommissions.push({
+              amount: 25,
+              fromEmail: user.email,
+              earnedAt: Date.now(),
+              clearsAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
+              reference: reference
+            });
             referrer.referralCount = (referrer.referralCount || 0) + 1;
             user.commissionPaid = true;
           }
@@ -1160,15 +1171,33 @@ app.post('/api/affiliate/stats', (req, res) => {
     }
   });
 
+  // Split commissions into CLEARED (past the 30-day hold, withdrawable)
+  // and PENDING (still inside the hold window, protects against refunds).
+  const now = Date.now();
+  let cleared = 0, pending = 0, nextClearDate = null;
+  (user.pendingCommissions || []).forEach(function(c){
+    if (c.cancelled) return;
+    if (now >= c.clearsAt) { cleared += c.amount; }
+    else {
+      pending += c.amount;
+      if (!nextClearDate || c.clearsAt < nextClearDate) nextClearDate = c.clearsAt;
+    }
+  });
+  // Include any legacy earnings recorded before the hold system existed
+  cleared += (user.earnings || 0);
+
   res.json({
     success: true,
     refCode: user.refCode,
     refLink: 'https://skyblueprint.company/?ref=' + user.refCode,
     signups: signups,
     paidReferrals: paid,
-    earnings: user.earnings || 0,
+    earnings: cleared + pending,
+    pending: pending,
+    nextClearDate: nextClearDate,
     paidOut: user.paidOut || 0,
-    balance: (user.earnings || 0) - (user.paidOut || 0),
+    balance: cleared - (user.paidOut || 0),
+    minPayout: 200,
     payout: user.payout || null
   });
 });
@@ -1205,10 +1234,18 @@ app.post('/api/affiliate/request-payout', async (req, res) => {
   const user = db.users[session.email];
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  const balance = (user.earnings || 0) - (user.paidOut || 0);
-  const MIN_PAYOUT = 100; // R100 minimum, keeps transfer fees sensible
+  // Only CLEARED commissions (past the 30-day hold) can be withdrawn.
+  const now = Date.now();
+  let cleared = 0;
+  (user.pendingCommissions || []).forEach(function(c){
+    if (!c.cancelled && now >= c.clearsAt) cleared += c.amount;
+  });
+  cleared += (user.earnings || 0);
+  const balance = cleared - (user.paidOut || 0);
+
+  const MIN_PAYOUT = 200; // R200 — keeps PayPal/bank fees a sensible % of the payout
   if (balance < MIN_PAYOUT) {
-    return res.status(400).json({ error: 'You need at least R' + MIN_PAYOUT + ' to request a payout. Your current balance is R' + balance + '.' });
+    return res.status(400).json({ error: 'You need at least R' + MIN_PAYOUT + ' in cleared earnings to request a payout. Your available balance is R' + balance + '.' });
   }
   if (!user.payout || !user.payout.account) {
     return res.status(400).json({ error: 'Please add your payout details first.' });
@@ -1234,6 +1271,41 @@ app.post('/api/affiliate/request-payout', async (req, res) => {
   } catch(e) { console.log('payout email failed:', e.message); }
 
   res.json({ success: true, message: 'Payout requested. We will process it within 5 working days.', amount: balance });
+});
+
+// Owner-only: cancel a commission if a referred customer refunded or
+// charged back. Only works while the commission is still within the
+// 30-day hold — which is exactly why the hold exists.
+app.post('/api/affiliate/cancel-commission', (req, res) => {
+  const { token, customerEmail } = req.body;
+  if (!token || !customerEmail) return res.status(400).json({ error: 'Missing token or customer email' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired' });
+  if (session.email !== OWNER_EMAIL_BE.toLowerCase()) return res.status(403).json({ error: 'Owner only' });
+
+  const target = String(customerEmail).toLowerCase().trim();
+  const customer = db.users[target];
+  if (!customer || !customer.referredBy) return res.status(404).json({ error: 'No referral found for that customer' });
+
+  const referrer = db.users[customer.referredBy];
+  if (!referrer || !referrer.pendingCommissions) return res.status(404).json({ error: 'No commission found' });
+
+  let cancelled = 0;
+  referrer.pendingCommissions.forEach(function(c){
+    if (c.fromEmail === target && !c.cancelled) {
+      if (Date.now() >= c.clearsAt) return; // already cleared and possibly paid out
+      c.cancelled = true;
+      c.cancelledAt = Date.now();
+      cancelled += c.amount;
+    }
+  });
+  if (cancelled > 0) {
+    referrer.referralCount = Math.max(0, (referrer.referralCount || 1) - 1);
+    customer.commissionPaid = false;
+    saveDB(db);
+  }
+  res.json({ success: true, cancelled: cancelled, message: cancelled > 0 ? 'Commission of R' + cancelled + ' cancelled.' : 'Nothing to cancel (may already be cleared).' });
 });
 
 app.listen(PORT, () => {

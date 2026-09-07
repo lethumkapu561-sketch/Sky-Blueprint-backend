@@ -1204,7 +1204,7 @@ app.post('/api/affiliate/stats', (req, res) => {
 
 // Save how this affiliate wants to be paid (Skrill, bank, etc.)
 app.post('/api/affiliate/payout-details', (req, res) => {
-  const { token, method, account, accountName } = req.body;
+  const { token, method, account, accountName, bank } = req.body;
   if (!token) return res.status(400).json({ error: 'Missing token' });
   const db = loadDB();
   const session = db.sessions[token];
@@ -1218,6 +1218,7 @@ app.post('/api/affiliate/payout-details', (req, res) => {
     method: String(method),
     account: String(account).trim(),
     accountName: String(accountName || '').trim(),
+    bank: String(bank || '').trim(),
     updated: Date.now()
   };
   saveDB(db);
@@ -1243,7 +1244,7 @@ app.post('/api/affiliate/request-payout', async (req, res) => {
   cleared += (user.earnings || 0);
   const balance = cleared - (user.paidOut || 0);
 
-  const MIN_PAYOUT = 200; // R200 — keeps PayPal/bank fees a sensible % of the payout
+  const MIN_PAYOUT = 200; // R200 — sensible minimum so transfer fees stay a small % of the payout
   if (balance < MIN_PAYOUT) {
     return res.status(400).json({ error: 'You need at least R' + MIN_PAYOUT + ' in cleared earnings to request a payout. Your available balance is R' + balance + '.' });
   }
@@ -1252,7 +1253,17 @@ app.post('/api/affiliate/request-payout', async (req, res) => {
   }
 
   user.payoutRequests = user.payoutRequests || [];
-  user.payoutRequests.push({ amount: balance, requested: Date.now(), status: 'pending' });
+  const requestId = 'PR-' + Date.now().toString(36).toUpperCase();
+  user.payoutRequests.push({
+    id: requestId,
+    amount: balance,
+    requested: Date.now(),
+    status: 'pending',
+    method: user.payout.method,
+    account: user.payout.account,
+    bank: user.payout.bank || '',
+    referralCount: user.referralCount || 0
+  });
   saveDB(db);
 
   // Tell the owner so the payment can actually be sent
@@ -1260,17 +1271,42 @@ app.post('/api/affiliate/request-payout', async (req, res) => {
     await sendEmail(OWNER_EMAIL_BE, 'PAYOUT REQUEST: R' + balance + ' - ' + user.email,
       '<div style="font-family:Arial,sans-serif;padding:20px;background:#060914;color:#e2e8f0;border-radius:12px">' +
       '<h2 style="color:#38bdf8">Affiliate Payout Request</h2>' +
+      '<p><strong>Request ID:</strong> ' + requestId + '</p>' +
       '<p><strong>Affiliate:</strong> ' + user.fname + ' ' + (user.lname||'') + '</p>' +
       '<p><strong>Email:</strong> ' + user.email + '</p>' +
       '<p><strong>Amount:</strong> R' + balance + '</p>' +
       '<p><strong>Method:</strong> ' + user.payout.method + '</p>' +
       '<p><strong>Account:</strong> ' + user.payout.account + '</p>' +
+      (user.payout.bank ? '<p><strong>Bank:</strong> ' + user.payout.bank + '</p>' : '') +
       '<p><strong>Account name:</strong> ' + (user.payout.accountName || '-') + '</p>' +
       '<p><strong>Paid referrals:</strong> ' + (user.referralCount || 0) + '</p>' +
       '</div>');
   } catch(e) { console.log('payout email failed:', e.message); }
 
-  res.json({ success: true, message: 'Payout requested. We will process it within 5 working days.', amount: balance });
+  // Confirmation to the AFFILIATE so they know it was received
+  try {
+    await sendEmail(user.email, 'Payout request received — R' + balance + ' (' + requestId + ')',
+      '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;background:#060914;color:#e2e8f0;border-radius:12px">' +
+      '<h2 style="color:#38bdf8;margin-top:0">Payout request received</h2>' +
+      '<p>Hi ' + user.fname + ',</p>' +
+      '<p>We have received your payout request. Here are the details:</p>' +
+      '<table style="width:100%;border-collapse:collapse;margin:16px 0">' +
+      '<tr><td style="padding:8px 0;color:#94a3b8">Reference</td><td style="padding:8px 0;text-align:right"><strong>' + requestId + '</strong></td></tr>' +
+      '<tr><td style="padding:8px 0;color:#94a3b8">Amount</td><td style="padding:8px 0;text-align:right"><strong style="color:#10b981">R' + balance + '</strong></td></tr>' +
+      '<tr><td style="padding:8px 0;color:#94a3b8">Paying to</td><td style="padding:8px 0;text-align:right">' + user.payout.method + ' — ' + user.payout.account + '</td></tr>' +
+      '<tr><td style="padding:8px 0;color:#94a3b8">Referrals earned from</td><td style="padding:8px 0;text-align:right">' + (user.referralCount || 0) + '</td></tr>' +
+      '</table>' +
+      '<p style="font-size:13px;color:#94a3b8">We process payouts within 5 working days. You will receive a receipt once the payment has been sent.</p>' +
+      (user.payout.method === 'skrill'
+        ? '<p style="font-size:12px;color:#f59e0b">Note: Skrill charges its own fees and converts currency, so you may receive less than the full amount. Choose PayShap or bank transfer next time to receive the full amount in Rands.</p>'
+        : user.payout.method === 'payshap'
+        ? '<p style="font-size:12px;color:#10b981">PayShap payments arrive instantly and are free to receive. Make sure your ShapID is registered in your banking app.</p>'
+        : '') +
+      '<p style="font-size:12px;color:#64748b;border-top:1px solid rgba(255,255,255,0.1);padding-top:14px;margin-top:20px">Sky Blueprint · skyblueprint.company</p>' +
+      '</div>');
+  } catch(e) { console.log('affiliate confirmation email failed:', e.message); }
+
+  res.json({ success: true, message: 'Payout requested. Check your email for confirmation. We process payouts within 5 working days.', amount: balance, requestId: requestId });
 });
 
 // Owner-only: cancel a commission if a referred customer refunded or
@@ -1306,6 +1342,91 @@ app.post('/api/affiliate/cancel-commission', (req, res) => {
     saveDB(db);
   }
   res.json({ success: true, cancelled: cancelled, message: cancelled > 0 ? 'Commission of R' + cancelled + ' cancelled.' : 'Nothing to cancel (may already be cleared).' });
+});
+
+// Owner-only: mark a payout as PAID and send the affiliate a receipt.
+// This is the record you keep for SARS and the proof they receive.
+app.post('/api/affiliate/mark-paid', async (req, res) => {
+  const { token, affiliateEmail, requestId, paymentRef } = req.body;
+  if (!token || !affiliateEmail) return res.status(400).json({ error: 'Missing token or affiliate email' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired' });
+  if (session.email !== OWNER_EMAIL_BE.toLowerCase()) return res.status(403).json({ error: 'Owner only' });
+
+  const affEmail = String(affiliateEmail).toLowerCase().trim();
+  const aff = db.users[affEmail];
+  if (!aff || !aff.payoutRequests) return res.status(404).json({ error: 'No payout requests found for that affiliate' });
+
+  // Find the request — by id if given, otherwise the oldest pending one
+  let request = null;
+  if (requestId) request = aff.payoutRequests.find(function(r){ return r.id === requestId && r.status === 'pending'; });
+  else request = aff.payoutRequests.find(function(r){ return r.status === 'pending'; });
+  if (!request) return res.status(404).json({ error: 'No pending payout request found' });
+
+  request.status = 'paid';
+  request.paidAt = Date.now();
+  request.paymentRef = paymentRef || '';
+  request.receiptNo = 'SB-' + new Date().getFullYear() + '-' + String(Date.now()).slice(-6);
+
+  // Record that this money has now been paid out, so it cannot be claimed twice
+  aff.paidOut = (aff.paidOut || 0) + request.amount;
+  saveDB(db);
+
+  // Send the affiliate their receipt
+  try {
+    const paidDate = new Date(request.paidAt).toLocaleDateString('en-ZA', { year:'numeric', month:'long', day:'numeric' });
+    await sendEmail(affEmail, 'Payment sent — R' + request.amount + ' (Receipt ' + request.receiptNo + ')',
+      '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:28px;background:#ffffff;color:#1e293b;border:1px solid #e2e8f0;border-radius:12px">' +
+      '<div style="border-bottom:3px solid #38bdf8;padding-bottom:16px;margin-bottom:20px">' +
+      '<h2 style="margin:0 0 4px;color:#0f172a">Payment Receipt</h2>' +
+      '<p style="margin:0;color:#64748b;font-size:13px">Sky Blueprint Affiliate Programme</p>' +
+      '</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:14px">' +
+      '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Receipt number</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9"><strong>' + request.receiptNo + '</strong></td></tr>' +
+      '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Date paid</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9">' + paidDate + '</td></tr>' +
+      '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Paid to</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9">' + aff.fname + ' ' + (aff.lname||'') + '</td></tr>' +
+      '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Method</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9">' + (request.method === 'payshap' ? 'PayShap' : request.method === 'bank' ? 'Bank transfer' : request.method) + ' — ' + request.account + ((aff.payout && aff.payout.bank) ? ' (' + aff.payout.bank + ')' : '') + '</td></tr>' +
+      '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Referrals</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9">' + (request.referralCount || 0) + ' paying customer(s)</td></tr>' +
+      (request.paymentRef ? '<tr><td style="padding:10px 0;color:#64748b;border-bottom:1px solid #f1f5f9">Payment reference</td><td style="padding:10px 0;text-align:right;border-bottom:1px solid #f1f5f9">' + request.paymentRef + '</td></tr>' : '') +
+      '<tr><td style="padding:14px 0;font-size:16px"><strong>Total paid</strong></td><td style="padding:14px 0;text-align:right;font-size:20px"><strong style="color:#059669">R' + request.amount + '</strong></td></tr>' +
+      '</table>' +
+      '<p style="font-size:13px;color:#475569;margin-top:20px">Thank you for growing Sky Blueprint. Keep sharing your link to earn more.</p>' +
+      '<p style="font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:14px;margin-top:20px">' +
+      'Sky Blueprint · skyblueprint.company<br>' +
+      'This receipt is for your records. Commission income may be taxable — please keep it for your tax return.' +
+      '</p></div>');
+  } catch(e) { console.log('receipt email failed:', e.message); }
+
+  res.json({ success: true, receiptNo: request.receiptNo, amount: request.amount, message: 'Marked as paid and receipt sent to ' + affEmail });
+});
+
+// Owner-only: list every pending payout request across all affiliates
+app.post('/api/affiliate/pending-payouts', (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  const db = loadDB();
+  const session = db.sessions[token];
+  if (!session) return res.status(401).json({ error: 'Session expired' });
+  if (session.email !== OWNER_EMAIL_BE.toLowerCase()) return res.status(403).json({ error: 'Owner only' });
+
+  const pending = [];
+  Object.keys(db.users).forEach(function(e){
+    const u = db.users[e];
+    (u.payoutRequests || []).forEach(function(r){
+      if (r.status === 'pending') {
+        pending.push({
+          id: r.id, email: e, name: (u.fname || '') + ' ' + (u.lname || ''),
+          amount: r.amount, method: r.method, account: r.account,
+          accountName: (u.payout && u.payout.accountName) || '',
+          bank: r.bank || (u.payout && u.payout.bank) || '',
+          referralCount: r.referralCount || 0, requested: r.requested
+        });
+      }
+    });
+  });
+  pending.sort(function(a,b){ return a.requested - b.requested; });
+  res.json({ success: true, pending: pending, total: pending.reduce(function(s,r){ return s + r.amount; }, 0) });
 });
 
 app.listen(PORT, () => {

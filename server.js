@@ -974,9 +974,15 @@ app.post('/api/customers/delete', (req, res) => {
 // ═══════════════════════════════════════════════════════════
 const multer = require('multer');
 const ffmpegPath = require('ffmpeg-static');
+const ffprobeStatic = require('ffprobe-static');
 const ffmpeg = require('fluent-ffmpeg');
 const os = require('os');
 ffmpeg.setFfmpegPath(ffmpegPath);
+// CRITICAL: ffmpeg-static ships ONLY the ffmpeg binary — it does NOT include
+// ffprobe. Without this line, ffmpeg.ffprobe() fails on Railway with
+// "spawn ffprobe ENOENT", which surfaced to users as the misleading
+// "Could not read this video file" error on every single upload.
+ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 // Store uploads temporarily in the OS temp folder, max 300MB, videos only
 const upload = multer({
@@ -994,6 +1000,13 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
   const inputPath = req.file.path;
   const outputPath = inputPath + '-compressed.mp4';
   const targetMB = parseFloat(req.body.targetMB) || 10;
+  // Compression mode: 'size' (hit a target MB) or 'quality' (CRF-based).
+  // CRF keeps a consistent visual quality instead of a fixed file size.
+  const mode = (req.body.mode === 'quality') ? 'quality' : 'size';
+  const crf = Math.min(40, Math.max(18, parseInt(req.body.crf, 10) || 26));
+  // H.265 compresses roughly 20-50% smaller than H.264 at the same quality,
+  // but takes longer to encode and is less compatible with older devices.
+  const codec = (req.body.codec === 'h265') ? 'libx265' : 'libx264';
   let finished = false;
   let command = null;
 
@@ -1041,16 +1054,35 @@ app.post('/api/compress-video', upload.single('video'), async (req, res) => {
       const totalKbps = (safeMB * 8 * 1024) / duration;
       let videoKbps = Math.max(100, Math.round(totalKbps - audioKbps));
 
+      // H.265 encodes roughly 3.5x slower than H.264 (measured). On Railway's
+      // shared CPU, a 4-minute H.265 job would run past the 12-minute timeout
+      // and fail after a long wait. Cap H.265 to shorter clips rather than let
+      // someone wait 12 minutes for a guaranteed failure.
+      if (codec === 'libx265' && duration > 90) {
+        finished = true; clearTimeout(hardTimeout);
+        cleanup(inputPath, outputPath);
+        return res.status(400).json({ error: 'H.265 is much slower to encode. For videos over 90 seconds, please use H.264 (the default) — it still compresses well and finishes far quicker.' });
+      }
+
+      const scaleFilter = "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
+      const baseOpts = ['-preset veryfast', '-movflags +faststart', '-vf', scaleFilter];
+
       command = ffmpeg(inputPath)
-        .videoCodec('libx264')
-        .videoBitrate(videoKbps)
+        .videoCodec(codec)
         .audioCodec('aac')
-        .audioBitrate(audioKbps)
-        // Cap resolution at 720p. Testing showed a 1080p video alone can push
-        // ffmpeg's memory to ~495MB — dangerously close to Railway's 512MB
-        // free-tier ceiling. 720p keeps real headroom for the rest of the
-        // server and other requests, while still looking sharp on a phone.
-        .outputOptions(['-preset veryfast', '-movflags +faststart', '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"])
+        .audioBitrate(audioKbps);
+
+      if (mode === 'quality') {
+        // CRF mode — consistent visual quality, size varies with content.
+        // H.265 needs a slightly higher CRF for equivalent quality to H.264.
+        const effectiveCrf = (codec === 'libx265') ? Math.min(45, crf + 2) : crf;
+        command = command.outputOptions(baseOpts.concat(['-crf', String(effectiveCrf)]));
+      } else {
+        // Target-size mode — calculate the bitrate needed to hit targetMB.
+        command = command.videoBitrate(videoKbps).outputOptions(baseOpts);
+      }
+
+      command = command
         .on('error', (ffErr) => {
           if (finished) return;
           finished = true; clearTimeout(hardTimeout);
